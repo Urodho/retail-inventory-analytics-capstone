@@ -1,37 +1,115 @@
+import io
 import os
+import urllib.request
+import zipfile
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 st.set_page_config(
-    page_title="Retail Supply Chain Analytics",
+    page_title="East Africa Retail Supply Chain Analytics",
     layout="wide",
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STORE_CSV = os.path.join(BASE_DIR, "data", "retail_store_inventory.csv")
-ORDERS_CSV = os.path.join(BASE_DIR, "data", "supply_chain_orders.csv")
 SQL_FILE = os.path.join(BASE_DIR, "sql", "supply_chain_analytics_queries.sql")
+
+KAGGLE_STORE_URL = (
+    "https://www.kaggle.com/api/v1/datasets/download/"
+    "anirudhchauhan/retail-store-inventory-forecasting-dataset"
+)
+KAGGLE_ORDERS_URL = (
+    "https://www.kaggle.com/api/v1/datasets/download/"
+    "akalyanbce/inventory-supply-chain-dataset"
+)
+
+# Standardise benchmark codes to our 4-country East African retail network
+REGION_MAP = {
+    "South": "Kenya",
+    "North": "Uganda",
+    "East": "Tanzania",
+    "West": "Rwanda",
+}
+ISO_MAP = {
+    "Kenya": "KEN",
+    "Uganda": "UGA",
+    "Tanzania": "TZA",
+    "Rwanda": "RWA",
+}
+WH_MAP = {
+    "Warehouse 1": "Mombasa Port Hub",
+    "Warehouse 2": "Nairobi Central Hub",
+    "Warehouse 3": "Kampala Regional Hub",
+}
+SEASON_MAP = {
+    "Autumn": "Q4 Festive (Oct-Dec)",
+    "Winter": "Q1 Back-to-School (Jan-Mar)",
+    "Spring": "Q2 Long Rains (Apr-Jun)",
+    "Summer": "Q3 Mid-Year Dry (Jul-Sep)",
+}
+
+
+def find_local_csv(candidate_names):
+    lower_targets = {name.lower() for name in candidate_names}
+    for root, _, files in os.walk(BASE_DIR):
+        if "venv" in root or ".git" in root:
+            continue
+        for fname in files:
+            if fname.lower() in lower_targets:
+                return os.path.join(root, fname)
+    return None
+
+
+def download_csv_from_kaggle(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        zip_bytes = io.BytesIO(resp.read())
+    with zipfile.ZipFile(zip_bytes) as zf:
+        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        with zf.open(csv_names[0]) as csv_file:
+            return pd.read_csv(csv_file)
 
 
 @st.cache_data
 def load_data():
     # 1. Load daily retail store inventory data
-    store_df = pd.read_csv(STORE_CSV)
+    store_path = find_local_csv(
+        ["retail_store_inventory.csv", "clean_store_inventory.csv"]
+    )
+    if store_path:
+        store_df = pd.read_csv(store_path)
+    else:
+        store_df = download_csv_from_kaggle(KAGGLE_STORE_URL)
+
     if "Demand Forecast" in store_df.columns:
         store_df = store_df.drop(columns=["Demand Forecast"])
 
+    store_df["Region"] = store_df["Region"].replace(REGION_MAP)
+    store_df["Seasonality"] = store_df["Seasonality"].replace(SEASON_MAP)
+    store_df["ISO_Code"] = store_df["Region"].map(ISO_MAP)
     store_df["Date"] = pd.to_datetime(store_df["Date"])
     store_df["YearMonth"] = store_df["Date"].dt.to_period("M").astype(str)
     store_df["Net_Price"] = store_df["Price"] * (1.0 - store_df["Discount"] / 100.0)
     store_df["Net_Revenue"] = store_df["Units Sold"] * store_df["Net_Price"]
-    # Flag days where inventory on hand is within 10% of daily demand
     store_df["Near_Stockout"] = (
         store_df["Inventory Level"] <= store_df["Units Sold"] * 1.10
     ).astype(int)
 
     # 2. Load warehouse and supplier order data
-    orders_df = pd.read_csv(ORDERS_CSV)
+    orders_path = find_local_csv(
+        [
+            "supply_chain_orders.csv",
+            "inventory supply chain dataset.csv",
+            "clean_supply_chain_orders.csv",
+        ]
+    )
+    if orders_path:
+        orders_df = pd.read_csv(orders_path)
+    else:
+        orders_df = download_csv_from_kaggle(KAGGLE_ORDERS_URL)
+
+    orders_df["Region"] = orders_df["Region"].replace(REGION_MAP)
+    orders_df["Warehouse"] = orders_df["Warehouse"].replace(WH_MAP)
     orders_df["Order_Date"] = pd.to_datetime(orders_df["Date"], dayfirst=True)
     orders_df["Holding_Stock_Est"] = orders_df["Inventory Level"] * (
         orders_df["Cost of Goods Sold (COGS)"]
@@ -44,37 +122,40 @@ def load_data():
 store_df, orders_df = load_data()
 
 # Page Header
-st.title("Retail Supply Chain and Inventory Analytics")
-st.caption("Capstone Project | Zindua School Data Analytics | Student: Denis Urodho")
+st.title("East Africa Retail Supply Chain and Inventory Analytics")
+st.caption(
+    "Capstone Project | Zindua School Data Analytics | Student: Denis Urodho | "
+    "Operations Across Kenya, Uganda, Tanzania & Rwanda (Consolidated in USD)"
+)
 
 # Sidebar Filters
 st.sidebar.header("Filter Dashboard")
 
-regions = ["All"] + sorted(store_df["Region"].unique().tolist())
-selected_region = st.sidebar.selectbox("Region", regions)
+countries = ["All"] + sorted(store_df["Region"].unique().tolist())
+selected_country = st.sidebar.selectbox("Country Market", countries)
 
 store_categories = ["All"] + sorted(store_df["Category"].unique().tolist())
 selected_store_cat = st.sidebar.selectbox("Store Product Category", store_categories)
 
 stores = ["All"] + sorted(store_df["Store ID"].unique().tolist())
-selected_store = st.sidebar.selectbox("Store ID", stores)
+selected_store = st.sidebar.selectbox("Branch Store ID", stores)
 
 seasons = ["All"] + sorted(store_df["Seasonality"].unique().tolist())
-selected_season = st.sidebar.selectbox("Season", seasons)
+selected_season = st.sidebar.selectbox("Retail Quarter / Season", seasons)
 
 st.sidebar.divider()
-st.sidebar.subheader("Warehouse & Supplier Filters")
+st.sidebar.subheader("Logistics Hub & Supplier Filters")
 
 warehouses = ["All"] + sorted(orders_df["Warehouse"].unique().tolist())
-selected_warehouse = st.sidebar.selectbox("Warehouse", warehouses)
+selected_warehouse = st.sidebar.selectbox("Regional Warehouse Hub", warehouses)
 
 suppliers = ["All"] + sorted(orders_df["Supplier"].unique().tolist())
 selected_supplier = st.sidebar.selectbox("Supplier", suppliers)
 
 # Apply filters to Store dataframe
 f_store = store_df.copy()
-if selected_region != "All":
-    f_store = f_store[f_store["Region"] == selected_region]
+if selected_country != "All":
+    f_store = f_store[f_store["Region"] == selected_country]
 if selected_store_cat != "All":
     f_store = f_store[f_store["Category"] == selected_store_cat]
 if selected_store != "All":
@@ -84,8 +165,8 @@ if selected_season != "All":
 
 # Apply filters to Orders dataframe
 f_orders = orders_df.copy()
-if selected_region != "All":
-    f_orders = f_orders[f_orders["Region"] == selected_region]
+if selected_country != "All":
+    f_orders = f_orders[f_orders["Region"] == selected_country]
 if selected_store_cat in ["Clothing", "Electronics", "Furniture"]:
     f_orders = f_orders[f_orders["Category"] == selected_store_cat]
 if selected_warehouse != "All":
@@ -110,11 +191,11 @@ wh_util = (
 )
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Net Store Revenue", f"${total_rev / 1e6:,.2f}M")
+k1.metric("Net Retail Sales", f"${total_rev / 1e6:,.2f}M")
 k2.metric("Days of Supply", f"{avg_dos:.2f} days")
 k3.metric("Stock-Out Risk Rate", f"{risk_rate:.2f}%")
-k4.metric("Warehouse Utilisation", f"{wh_util:.1f}%")
-k5.metric("Avg Lead Time", f"{avg_lead:.1f} days")
+k4.metric("Hub Capacity Used", f"{wh_util:.1f}%")
+k5.metric("Avg Corridor Lead Time", f"{avg_lead:.1f} days")
 k6.metric("Backorder Rate", f"{backorder_rate:.2f}%")
 
 st.divider()
@@ -134,13 +215,45 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # TAB 1: STOCK AVAILABILITY
 # -------------------------------------------------------------------------
 with tab1:
-    st.subheader("1. Stock Availability")
-    st.write("Question: Are enough products on the shelf in every region and store when customers want them?")
+    st.subheader("1. Stock Availability Across East Africa")
+    st.write("Question: Are enough products on the shelf across Kenya, Uganda, Tanzania, and Rwanda when customers want them?")
 
     col_left, col_right = st.columns([1.1, 1])
 
     with col_left:
         if len(f_store) > 0:
+            map_df = (
+                f_store.groupby(["Region", "ISO_Code"], as_index=False)
+                .agg(
+                    Risk_Pct=("Near_Stockout", "mean"),
+                    Avg_Stock=("Inventory Level", "mean"),
+                    Avg_Sales=("Units Sold", "mean"),
+                    Net_Revenue=("Net_Revenue", "sum"),
+                )
+            )
+            map_df["Risk_Pct"] = (map_df["Risk_Pct"] * 100).round(2)
+            map_df["Days_of_Supply"] = (map_df["Avg_Stock"] / map_df["Avg_Sales"]).round(2)
+
+            fig_map = px.choropleth(
+                map_df,
+                locations="ISO_Code",
+                color="Risk_Pct",
+                hover_name="Region",
+                hover_data={"ISO_Code": False, "Risk_Pct": True, "Days_of_Supply": True},
+                color_continuous_scale="YlOrRd",
+                scope="africa",
+                title="East Africa Stock-Out Risk (%) by Country Market",
+                labels={"Risk_Pct": "Risk %"},
+            )
+            fig_map.update_geos(
+                lataxis_range=[-12.5, 5.5],
+                lonaxis_range=[28.0, 42.5],
+                showcountries=True,
+                countrycolor="#cbd5e1",
+            )
+            fig_map.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0}, height=340)
+            st.plotly_chart(fig_map, width="stretch")
+
             pivot_risk = (
                 f_store.groupby(["Region", "Store ID"])["Near_Stockout"]
                 .mean()
@@ -153,35 +266,13 @@ with tab1:
                 text_auto=True,
                 aspect="auto",
                 color_continuous_scale="YlOrRd",
-                title="Stock-Out Risk (%) by Region and Store",
-                labels={"color": "Risk %"},
+                title="Stock-Out Risk (%) by Country and Branch Store",
+                labels={"color": "Risk %", "y": "Country"},
             )
             st.plotly_chart(fig_heat, width="stretch")
 
-            reg_summary = (
-                f_store.groupby("Region", as_index=False)
-                .agg(
-                    Units_Sold=("Units Sold", "sum"),
-                    Avg_Stock=("Inventory Level", "mean"),
-                    Avg_Daily_Sales=("Units Sold", "mean"),
-                )
-            )
-            reg_summary["Days_of_Supply"] = (
-                reg_summary["Avg_Stock"] / reg_summary["Avg_Daily_Sales"]
-            ).round(2)
-            fig_reg = px.bar(
-                reg_summary,
-                x="Region",
-                y="Days_of_Supply",
-                text="Days_of_Supply",
-                title="Average Days of Supply by Region",
-                color="Region",
-            )
-            fig_reg.update_layout(showlegend=False, yaxis_title="Days of Supply")
-            st.plotly_chart(fig_reg, width="stretch")
-
     with col_right:
-        st.markdown("**High-Risk Products and Reorder Recommendations**")
+        st.markdown("**High-Risk Products and Priority Reorder Flags**")
         if len(f_store) > 0:
             sku_store = (
                 f_store.groupby(["Product ID", "Category", "Store ID", "Region"], as_index=False)
@@ -195,8 +286,6 @@ with tab1:
                 sku_store["Avg_Stock"] / sku_store["Avg_Daily_Sales"]
             ).round(2)
             sku_store["Risk_Pct"] = (sku_store["Risk_Pct"] * 100).round(2)
-            sku_store["Avg_Stock"] = sku_store["Avg_Stock"].round(1)
-            sku_store["Avg_Daily_Sales"] = sku_store["Avg_Daily_Sales"].round(1)
 
             def get_reorder_status(row):
                 if row["Risk_Pct"] >= 12.5 or row["Days_of_Supply"] < 1.92:
@@ -206,14 +295,16 @@ with tab1:
                 return "Healthy"
 
             sku_store["Action"] = sku_store.apply(get_reorder_status, axis=1)
-            sku_store = sku_store.sort_values("Risk_Pct", ascending=False).head(15)
+            sku_store = sku_store.rename(columns={"Region": "Country"}).sort_values(
+                "Risk_Pct", ascending=False
+            ).head(16)
             st.dataframe(
                 sku_store[
                     [
                         "Product ID",
                         "Category",
                         "Store ID",
-                        "Region",
+                        "Country",
                         "Days_of_Supply",
                         "Risk_Pct",
                         "Action",
@@ -227,8 +318,8 @@ with tab1:
 # TAB 2: INVENTORY CAPITAL EFFICIENCY
 # -------------------------------------------------------------------------
 with tab2:
-    st.subheader("2. Inventory Capital Efficiency")
-    st.write("Question: Where is working capital productive versus tied up in holding stock and transport costs?")
+    st.subheader("2. Inventory Capital Efficiency Across Regional Hubs")
+    st.write("Question: Where is working capital productive versus tied up in holding stock and corridor transport costs?")
 
     c1, c2 = st.columns([1.15, 1])
 
@@ -252,7 +343,7 @@ with tab2:
                 {
                     "Active_COGS": "Sold COGS",
                     "Est_Holding_Stock": "Estimated Holding Stock",
-                    "Transport_Cost": "Transport Cost",
+                    "Transport_Cost": "Corridor Transport Cost",
                 }
             )
             fig_stack = px.bar(
@@ -289,8 +380,8 @@ with tab2:
                 y="Warehouse",
                 orientation="h",
                 text="Utilisation_Pct",
-                title="Warehouse Capacity Utilisation (%)",
-                labels={"Utilisation_Pct": "Capacity Used (%)"},
+                title="Regional Hub Capacity Utilisation (%)",
+                labels={"Utilisation_Pct": "Capacity Used (%)", "Warehouse": "Hub"},
             )
             st.plotly_chart(fig_wh, width="stretch")
 
@@ -300,7 +391,7 @@ with tab2:
                 .unstack(fill_value=0)
                 .reset_index()
             )
-            st.markdown("**Order Fulfilment Breakdown by Warehouse**")
+            st.markdown("**Order Fulfilment Breakdown by Regional Hub**")
             st.dataframe(status_counts, width="stretch", hide_index=True)
 
 # -------------------------------------------------------------------------
@@ -308,7 +399,7 @@ with tab2:
 # -------------------------------------------------------------------------
 with tab3:
     st.subheader("3. Demand and Price Stability Over Time")
-    st.write("Question: How do sales, stock levels, and net selling prices shift across months, seasons, and promotions?")
+    st.write("Question: How do sales, stock levels, and net selling prices shift across months, East African retail quarters, and promotions?")
 
     sku_options = ["All Products"] + sorted(store_df["Product ID"].unique().tolist())
     chosen_sku = st.selectbox("Filter Trend by Product ID (SKU)", sku_options)
@@ -358,7 +449,8 @@ with tab3:
                 x="Seasonality",
                 y="Total_Units",
                 text="Total_Units",
-                title="Total Units Sold by Season",
+                title="Total Units Sold by East African Retail Quarter",
+                labels={"Seasonality": "Retail Quarter"},
             )
             st.plotly_chart(fig_season, width="stretch")
 
@@ -396,7 +488,7 @@ with tab3:
 # -------------------------------------------------------------------------
 with tab4:
     st.subheader("4. Supplier and Product Reliability")
-    st.write("Question: Which products and suppliers help or bottleneck operations the most?")
+    st.write("Question: Which products and suppliers help or bottleneck East African operations the most?")
 
     ctl1, ctl2, ctl3 = st.columns(3)
     rank_direction = ctl1.radio("Ranking View", ["Top N", "Bottom N"], horizontal=True)
@@ -489,6 +581,9 @@ with tab4:
 with tab5:
     st.subheader("SQL Verification Queries")
     st.write("These SQL queries compute the same KPIs directly on the relational tables.")
-    if os.path.exists(SQL_FILE):
-        with open(SQL_FILE, "r", encoding="utf-8") as f:
+    sql_path = find_local_csv(["supply_chain_analytics_queries.sql"]) or SQL_FILE
+    if os.path.exists(sql_path):
+        with open(sql_path, "r", encoding="utf-8") as f:
             st.code(f.read(), language="sql")
+    else:
+        st.info("Add sql/supply_chain_analytics_queries.sql to your GitHub repo to display the SQL code here.")

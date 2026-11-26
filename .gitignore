@@ -1,9 +1,8 @@
 # Ignore large datasets and archives
-*.csv
+.csv
 *.xlsx
 *.xls
 *.zip
-
 # Ignore Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 _pycache__/
